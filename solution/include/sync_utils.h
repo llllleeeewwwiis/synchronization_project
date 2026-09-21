@@ -27,10 +27,15 @@ void jitter_us(int min_us, int max_us);
 
 /* ---------- Reader-Writer Lock for Conference Schedule ---------- */
 
-/* Reader-Writer lock (students implement in readers_writers.c) */
+/* Writer-priority reader-writer lock (readers_writers.c). */
 typedef struct {
-  /* TODO: add semaphores/mutexes and counters */
-  // You need to add the required fields here to implement writer-priority reader-writer lock
+  pthread_mutex_t m;
+  sem_t rlock;
+  sem_t wlock;
+  int readers;
+  int readers_waiting;
+  int writers_waiting;
+  bool writer_active;
 } rwlock_t;
 
 int  rw_init(rwlock_t *rw);
@@ -40,13 +45,25 @@ void rw_runlock(rwlock_t *rw);
 void rw_wlock(rwlock_t *rw);
 void rw_wunlock(rwlock_t *rw);
 
-/* Monitor-Style Reader-Writer lock (students implement in rwlock_monitor.c) */
+/* Monitor-style reader-writer lock (rwlock_monitor.c). */
 #define RWM_WRITER_BATCH 3
 #define RWM_PHASE_WRITER 0
 #define RWM_PHASE_READER 1
 
 typedef struct {
-  /* TODO: add mutex, condition variables, counters, and batch/phase state */
+  pthread_mutex_t m;
+  pthread_cond_t can_read;
+  pthread_cond_t can_write;
+  int AR; /* Active readers. */
+  int WR; /* Waiting readers. */
+  int AW; /* Active writer (0 or 1). */
+  int WW; /* Waiting writers. */
+  int writer_batch_count;
+  int phase;
+  /* Each reader phase admits only the readers waiting when it begins. */
+  uint64_t next_reader_ticket;
+  uint64_t reader_batch_end;
+  int reader_batch_remaining;
 } rwlock_monitor_t;
 
 int  rwm_init(rwlock_monitor_t *rw);
@@ -65,10 +82,15 @@ typedef struct {
   int prepared_by;       // Cook who prepared it
 } food_tray_t;
 
-/* Bounded buffer (students implement) */
+/* Bounded FIFO buffer. */
 typedef struct {
-  /* TODO: add buffer array, semaphores, mutex, and indices */
-  // You need to add the required fields here to implement a bounded buffer
+  food_tray_t **buffer;
+  sem_t empty;
+  sem_t full;
+  pthread_mutex_t m;
+  int cap;
+  int head;
+  int tail;
 } bb_t;
 
 int  bb_init(bb_t *q, int capacity);

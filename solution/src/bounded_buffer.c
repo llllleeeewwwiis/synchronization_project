@@ -26,6 +26,10 @@ static void* cook(void* arg) {
     
     // Get unique tray ID
     pthread_mutex_lock(&tray_counter_mutex);
+    if (tray_counter >= NUM_ATTENDEES * SNACKS_PER_ATTENDEE) {
+      pthread_mutex_unlock(&tray_counter_mutex);
+      break;
+    }
     int tray_id = tray_counter++;
     pthread_mutex_unlock(&tray_counter_mutex);
     
@@ -58,16 +62,17 @@ static void* attendee(void* arg) {
 int snacks_run(void) {
   srand((unsigned)time(NULL));
   if (bb_init(&snack_queue, BUF_C)) DIE("bb_init");
+  tray_counter = 0;
 
-  pthread_t people[NUM_ATTENDEES];
-  for (long i=0;i<NUM_COOKS;i++)   spawn(cook, (void*)i, "cook");
+  pthread_t people[NUM_ATTENDEES], cooks[NUM_COOKS];
+  for (long i=0;i<NUM_COOKS;i++)   cooks[i] = spawn(cook, (void*)i, "cook");
   for (long i=0;i<NUM_ATTENDEES;i++) people[i] = spawn(attendee, (void*)i, "attendee");
 
   for (int i=0;i<NUM_ATTENDEES;i++) join(people[i]);
+  for (int i=0;i<NUM_COOKS;i++) join(cooks[i]);
 
-  /* In a full sim, cooks run forever; in the module demo we don't join them. */
+  /* Every cook has finished, so the empty queue can be destroyed safely. */
   LOG("Snacks module complete (all attendees served once).");
   bb_destroy(&snack_queue);
   return 0;
 }
-

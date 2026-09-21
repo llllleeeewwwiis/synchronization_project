@@ -2,6 +2,7 @@
 #include <unistd.h>
 #include "readers_writers.h"
 #include "sync_utils.h"
+#include <errno.h>
 
 int usleep(unsigned int usec);
 extern int rw_init(rwlock_t *rw);   /* in sync_utils.c: sets m,wlock, counters */
@@ -21,41 +22,66 @@ int get_violation_count(void) {
   return violation_count;
 }
 
+static void wait_for_sem(sem_t *sem) {
+  while (sem_wait(sem) == -1) {
+    if (errno != EINTR) DIE("sem_wait");
+  }
+}
+
 void rw_rlock(rwlock_t *rw) {
-    /* TODO: Implement reader lock (writer-priority)
-     * - Block if a writer is waiting or active
-     * - Increment reader count
-     * - Use proper mutex locking
-     */
-    (void)rw;  // Remove this when you implement the function
+  pthread_mutex_lock(&rw->m);
+  if (rw->writer_active || rw->writers_waiting > 0) {
+    rw->readers_waiting++;
+    pthread_mutex_unlock(&rw->m);
+    /* The unlocking writer reserves a reader slot before waking us. */
+    wait_for_sem(&rw->rlock);
+    return;
+  }
+  rw->readers++;
+  pthread_mutex_unlock(&rw->m);
 }
 
 void rw_runlock(rwlock_t *rw) {
-    /* TODO: Implement reader unlock
-     * - Decrement reader count
-     * - Signal waiting writers if this is the last reader
-     * - Use proper mutex locking
-     */
-    (void)rw;  // Remove this when you implement the function
+  pthread_mutex_lock(&rw->m);
+  rw->readers--;
+  if (rw->readers == 0 && rw->writers_waiting > 0) {
+    rw->writers_waiting--;
+    rw->writer_active = true;
+    if (sem_post(&rw->wlock) == -1) DIE("sem_post");
+  }
+  pthread_mutex_unlock(&rw->m);
 }
 
 void rw_wlock(rwlock_t *rw) {
-    /* TODO: Implement writer lock (writer-priority)
-     * - Increment writers_waiting to block new readers
-     * - Wait until no readers or writers are active
-     * - Set writer_active flag
-     * - Use proper mutex locking and semaphores
-     */
-    (void)rw;  // Remove this when you implement the function
+  pthread_mutex_lock(&rw->m);
+  rw->writers_waiting++;
+  if (rw->readers > 0 || rw->writer_active) {
+    pthread_mutex_unlock(&rw->m);
+    /* Ownership is handed directly to one waiting writer. */
+    wait_for_sem(&rw->wlock);
+    return;
+  }
+  rw->writers_waiting--;
+  rw->writer_active = true;
+  pthread_mutex_unlock(&rw->m);
 }
 
 void rw_wunlock(rwlock_t *rw) {
-    /* TODO: Implement writer unlock
-     * - Clear writer_active flag
-     * - Signal waiting writers if any
-     * - Use proper mutex locking
-     */
-    (void)rw;  // Remove this when you implement the function
+  pthread_mutex_lock(&rw->m);
+  rw->writer_active = false;
+  if (rw->writers_waiting > 0) {
+    rw->writers_waiting--;
+    rw->writer_active = true;
+    if (sem_post(&rw->wlock) == -1) DIE("sem_post");
+  } else {
+    /* Reserve every admitted reader before allowing new writers to arrive. */
+    while (rw->readers_waiting > 0) {
+      rw->readers_waiting--;
+      rw->readers++;
+      if (sem_post(&rw->rlock) == -1) DIE("sem_post");
+    }
+  }
+  pthread_mutex_unlock(&rw->m);
 }
 
 static void* reader(void* arg) {
@@ -99,7 +125,7 @@ static void* writer(void* arg) {
 }
 
 int schedule_run(void) {
-  rw_init(&board);
+  if (rw_init(&board)) DIE("rw_init");
   pthread_t readers[8], writers[2];
   for (long i=0;i<8;i++) readers[i] = spawn(reader, (void*)i, "reader");
   for (long i=0;i<2;i++) writers[i] = spawn(writer, (void*)i, "writer");

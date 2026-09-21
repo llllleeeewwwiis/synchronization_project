@@ -3,6 +3,13 @@
 #include "sync_utils.h"
 #include <sys/time.h>
 #include <string.h>
+#include <errno.h>
+
+static void wait_for_sem(sem_t *sem) {
+  while (sem_wait(sem) == -1) {
+    if (errno != EINTR) DIE("sem_wait");
+  }
+}
 
 int usleep(unsigned int usec);
 uint64_t now_ms(void) {
@@ -26,21 +33,40 @@ void jitter_us(int min_us, int max_us) {
 
 /* ------- Reader-Writer Lock: initialization and cleanup ------- */
 int rw_init(rwlock_t *rw) {
-  /* TODO: Initialize all fields in rwlock_t structure
-   * - Initialize mutex
-   * - Initialize semaphores
-   * - Set initial counter values
-   */
-  (void)rw;  // Remove this when you implement the function
+  if (!rw) {
+    errno = EINVAL;
+    return -1;
+  }
+  rw->readers = 0;
+  rw->readers_waiting = 0;
+  rw->writers_waiting = 0;
+  rw->writer_active = false;
+
+  int err = pthread_mutex_init(&rw->m, NULL);
+  if (err) {
+    errno = err;
+    return -1;
+  }
+  if (sem_init(&rw->rlock, 0, 0) == -1) {
+    err = errno;
+    pthread_mutex_destroy(&rw->m);
+    errno = err;
+    return -1;
+  }
+  if (sem_init(&rw->wlock, 0, 0) == -1) {
+    err = errno;
+    sem_destroy(&rw->rlock);
+    pthread_mutex_destroy(&rw->m);
+    errno = err;
+    return -1;
+  }
   return 0;
 }
 
 void rw_destroy(rwlock_t *rw) {
-  /* TODO: Clean up resources
-   * - Destroy mutex
-   * - Destroy semaphores
-   */
-  (void)rw;  // Remove this when you implement the function
+  sem_destroy(&rw->rlock);
+  sem_destroy(&rw->wlock);
+  pthread_mutex_destroy(&rw->m);
 }
 /* RW lock functions are implemented in readers_writers.c */
 
@@ -66,51 +92,63 @@ void free_food_tray(food_tray_t *tray) {
 
 /* ------- Bounded Buffer: initialization and operations ------- */
 int bb_init(bb_t *q, int capacity) {
-  /* TODO: Initialize bounded buffer
-   * - Allocate buffer array for food_tray_t pointers
-   * - Initialize head and tail to 0
-   * - Initialize empty semaphore to capacity
-   * - Initialize full semaphore to 0
-   * - Initialize mutex
-   * - Return 0 on success, -1 on failure
-   */
-  (void)q;
-  (void)capacity;
+  if (!q || capacity <= 0) {
+    errno = EINVAL;
+    return -1;
+  }
+  q->buffer = calloc((size_t)capacity, sizeof(*q->buffer));
+  if (!q->buffer) return -1;
+  q->cap = capacity;
+  q->head = 0;
+  q->tail = 0;
+
+  int err = pthread_mutex_init(&q->m, NULL);
+  if (err) goto fail_buffer;
+  if (sem_init(&q->empty, 0, (unsigned int)capacity) == -1) {
+    err = errno;
+    goto fail_mutex;
+  }
+  if (sem_init(&q->full, 0, 0) == -1) {
+    err = errno;
+    sem_destroy(&q->empty);
+    goto fail_mutex;
+  }
   return 0;
+
+fail_mutex:
+  pthread_mutex_destroy(&q->m);
+fail_buffer:
+  free(q->buffer);
+  q->buffer = NULL;
+  errno = err;
+  return -1;
 }
 
 void bb_destroy(bb_t *q) {
-  /* TODO: Clean up bounded buffer resources
-   * - Destroy mutex
-   * - Destroy semaphores
-   * - Free buffer array
-   */
-  (void)q;
+  /* All producers and consumers must have finished before destruction. */
+  sem_destroy(&q->empty);
+  sem_destroy(&q->full);
+  pthread_mutex_destroy(&q->m);
+  free(q->buffer);
+  q->buffer = NULL;
 }
 
 void bb_put(bb_t *q, food_tray_t *tray) {
-  /* TODO: Put item in buffer (producer)
-   * - Wait on empty semaphore
-   * - Lock mutex
-   * - Add tray to buffer at tail position
-   * - Update tail (circular: (tail + 1) % capacity)
-   * - Unlock mutex
-   * - Post to full semaphore
-   */
-  (void)q;
-  (void)tray;
+  wait_for_sem(&q->empty);
+  pthread_mutex_lock(&q->m);
+  q->buffer[q->tail] = tray;
+  q->tail = (q->tail + 1) % q->cap;
+  pthread_mutex_unlock(&q->m);
+  if (sem_post(&q->full) == -1) DIE("sem_post");
 }
 
 food_tray_t* bb_take(bb_t *q) {
-  /* TODO: Take item from buffer (consumer)
-   * - Wait on full semaphore
-   * - Lock mutex
-   * - Remove tray from buffer at head position
-   * - Update head (circular: (head + 1) % capacity)
-   * - Unlock mutex
-   * - Post to empty semaphore
-   * - Return the tray
-   */
-  (void)q;
-  return NULL;
+  wait_for_sem(&q->full);
+  pthread_mutex_lock(&q->m);
+  food_tray_t *tray = q->buffer[q->head];
+  q->buffer[q->head] = NULL;
+  q->head = (q->head + 1) % q->cap;
+  pthread_mutex_unlock(&q->m);
+  if (sem_post(&q->empty) == -1) DIE("sem_post");
+  return tray;
 }
